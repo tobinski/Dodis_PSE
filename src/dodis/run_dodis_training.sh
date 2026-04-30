@@ -75,7 +75,7 @@ else
 fi
 
 echo "Starte Training..."
-python -m spacy train train_el_dodis.cfg \
+python -W "ignore::DeprecationWarning" -m spacy train train_el_dodis.cfg \
     --output output/dodis \
     --gpu-id 0
 
