@@ -123,6 +123,7 @@ if __name__ == "__main__":
                     doc = nlp.make_doc(text)
                     ents = []
 
+                    # You generate a spacy doc per xml tag. Perhaps it would be better to generate one doc per xml document
                     for span_start, span_end, span_label, span_ref in spans:
                         span = doc.char_span(
                             span_start,
