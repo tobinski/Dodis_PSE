@@ -52,9 +52,12 @@ def extract_text_and_spans(elem):
             ref = child.get("ref", "")
             mention = "".join(child.itertext())
             if ref and mention:
+                stripped = mention.strip(" .()[]\n")
+                leading = len(mention) - len(mention.lstrip(" .()[]\n"))
                 start = len(text)
                 text += mention
-                spans.append((start, start + len(mention), ENTITY_TAGS[tag], ref))
+                if stripped:
+                    spans.append((start + leading, start + leading + len(stripped), ENTITY_TAGS[tag], ref))
         else:
             # Kein Entity-Tag: rekursiv den Text und eventuelle Spans holen
             child_text, child_spans = extract_text_and_spans(child)
@@ -130,7 +133,7 @@ if __name__ == "__main__":
                             span_end,
                             label=span_label,
                             kb_id=span_ref,
-                            alignment_mode="contract",
+                            alignment_mode="strict",
                         )
                         if span is not None:
                             ents.append(span)
