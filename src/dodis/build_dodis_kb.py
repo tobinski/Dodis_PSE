@@ -18,6 +18,7 @@ Output: data/dodis_entities.kb
 
 Usage:
     python src/dodis/build_dodis_kb.py
+    python src/dodis/build_dodis_kb.py --model xlm-roberta-base
     python src/dodis/build_dodis_kb.py --model de_dep_news_trf
     python src/dodis/build_dodis_kb.py --model de_core_news_lg
 """
@@ -32,11 +33,48 @@ from spacy.kb import InMemoryLookupKB
 
 # Bekannte Vektordimensionen pro Modell
 MODEL_VECTOR_SIZE = {
+    "roberta-base": 768,
+    "xlm-roberta-base": 768,
     "de_dep_news_trf": 768,
     "de_core_news_lg": 300,
     "de_core_news_md": 300,
     "de_core_news_sm": 96,
 }
+
+
+def _as_numpy_1d(array_like) -> np.ndarray | None:
+    """Convert torch/cupy/numpy-like tensor to a single 1D embedding vector."""
+    if array_like is None:
+        return None
+    # torch.Tensor path
+    if hasattr(array_like, "detach"):
+        arr = array_like.detach()
+        if hasattr(arr, "cpu"):
+            arr = arr.cpu()
+        arr = arr.numpy()
+    # cupy.ndarray path
+    elif hasattr(array_like, "get"):
+        arr = array_like.get()
+    else:
+        arr = np.asarray(array_like)
+
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return None
+
+    # Normalize common transformer output shapes to [hidden].
+    if arr.ndim == 0:
+        return None
+    if arr.ndim == 1:
+        vec = arr
+    else:
+        # Keep last dim as embedding dim and average over all leading dims.
+        vec = arr.reshape(-1, arr.shape[-1]).mean(axis=0)
+
+    vec = np.asarray(vec, dtype=np.float32)
+    if vec.ndim != 1 or vec.size == 0:
+        return None
+    return vec
 
 
 def get_vector(doc, is_transformer: bool) -> np.ndarray | None:
@@ -52,12 +90,28 @@ def get_vector(doc, is_transformer: bool) -> np.ndarray | None:
         trf_data = doc._.trf_data
         if trf_data is None:
             return None
-        # Letzter Hidden Layer: Shape (num_tokens, 768)
-        last_layer = trf_data.last_hidden_layer_state
-        if last_layer is None or last_layer.data.size == 0:
-            return None
-        # Mitteln über alle Token-Vektoren
-        return np.mean(last_layer.data, axis=0)
+
+        # spaCy/transformers versions expose different attributes.
+        hidden = None
+        if hasattr(trf_data, "last_hidden_layer_state"):
+            hidden = trf_data.last_hidden_layer_state
+        elif hasattr(trf_data, "model_output"):
+            model_output = trf_data.model_output
+            hidden = getattr(model_output, "last_hidden_state", None)
+            if hidden is None and isinstance(model_output, (tuple, list)) and model_output:
+                hidden = model_output[0]
+
+        vector = _as_numpy_1d(hidden)
+        if vector is not None:
+            return vector
+
+        # Fallback for older/newer versions: use first tensor buffer if present.
+        tensors = getattr(trf_data, "tensors", None)
+        if tensors:
+            vector = _as_numpy_1d(tensors[0])
+            if vector is not None:
+                return vector
+        return None
     else:
         token_vecs = [tok.vector for tok in doc if any(tok.vector)]
         if not token_vecs:
@@ -69,8 +123,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
-        default="de_core_news_lg",
-        help="spaCy-Modell (z.B. de_dep_news_trf oder de_core_news_lg)",
+        default="xlm-roberta-base",
+        help="spaCy-Modell (z.B. xlm-roberta-base, de_dep_news_trf oder de_core_news_lg)",
     )
     args = parser.parse_args()
 
@@ -82,15 +136,28 @@ if __name__ == "__main__":
     assert DB_PATH.exists(), f"Datenbank nicht gefunden: {DB_PATH} — zuerst tei_to_db.py ausführen"
 
     print(f"Lade Modell {args.model}...")
-    nlp = spacy.load(args.model)
+    # use spacy[transformer] to load custom model
+    if args.model == "roberta-base":
+        config = {
+            "model": {
+                "@architectures": "spacy-transformers.TransformerModel.v3",
+                "name": "roberta-base"  # XXX customize this bit
+            }
+        }
+        nlp = spacy.blank("de")
+        nlp.add_pipe("transformer", config=config)
+        nlp.initialize()
+    else:
+        nlp = spacy.load(args.model)
 
-    is_transformer = "trf" in args.model
+    is_transformer = args.model in {"roberta-base", "xlm-roberta-base", "de_dep_news_trf"}
     vector_size = MODEL_VECTOR_SIZE.get(args.model)
     if vector_size is None:
         # Automatisch ermitteln falls Modell unbekannt
         test_doc = nlp("Test")
         if is_transformer and test_doc._.trf_data:
-            vector_size = test_doc._.trf_data.last_hidden_layer_state.data.shape[-1]
+            probe_vec = get_vector(test_doc, is_transformer=True)
+            vector_size = len(probe_vec) if probe_vec is not None else 768
         else:
             vector_size = len(test_doc.vector)
     print(f"Vektordimension: {vector_size} ({'Transformer' if is_transformer else 'statisch'})")
